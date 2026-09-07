@@ -1,0 +1,16 @@
+# Source-only allowlist: never publish machine settings, diagnostics, test data,
+# generated executables, or backup files from this working directory.
+/*
+!/.gitignore
+!/.gitattributes
+!/README.md
+!/LICENSE
+!/build.ps1
+!/AppGate.cs
+!/ServiceEdition/
+/ServiceEdition/*
+!/ServiceEdition/*.cs
+!/ServiceEdition/build.ps1
+!/ServiceEdition/app.manifest
+!/ServiceEdition/README.md
+!/ServiceEdition/LICENSE
