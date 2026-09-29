@@ -21,6 +21,11 @@ namespace AppGateServiceEdition {
   readonly HashSet<string> seenWindows=new HashSet<string>(StringComparer.OrdinalIgnoreCase);
   readonly HashSet<string> relock=new HashSet<string>(StringComparer.OrdinalIgnoreCase);
   readonly int ownPid=Process.GetCurrentProcess().Id;
+  readonly Dictionary<uint,ProcessIdentity> identities=new Dictionary<uint,ProcessIdentity>();
+  sealed class ProcessIdentity {public IntPtr Handle;public string Exe;}
+  DateTime nextIdentityCleanup,nextParentCheck;
+  internal long MaxSweepMilliseconds;
+  internal int SweepCount;
   List<Rule> rules=new List<Rule>();
   PasswordDialog prompt;
   string prompting;
@@ -49,7 +54,14 @@ namespace AppGateServiceEdition {
    if(WindowApi.GetAncestor(window,2)!=window)return null;
    uint pid;WindowApi.GetWindowThreadProcessId(window,out pid);
    if(pid==ownPid)return null;
-   try{using(var p=Process.GetProcessById((int)pid))return p.ProcessName+".exe";}catch{return null;}
+   ProcessIdentity identity;
+   if(identities.TryGetValue(pid,out identity)){
+    if(SessionApi.WaitForSingleObject(identity.Handle,0)==258)return identity.Exe;
+    Native.CloseHandle(identity.Handle);identities.Remove(pid);
+   }
+   IntPtr handle=WindowApi.OpenIdentity(pid);if(handle==IntPtr.Zero)return null;
+   try{string exe=WindowApi.IdentityName(handle);if(exe==null)return null;identities[pid]=new ProcessIdentity{Handle=handle,Exe=exe};handle=IntPtr.Zero;return exe;}
+   finally{if(handle!=IntPtr.Zero)Native.CloseHandle(handle);}
   }
   bool IsLocked(string exe){return rules.Any(r=>r.Enabled&&!r.Allowed&&string.Equals(r.Exe,exe,StringComparison.OrdinalIgnoreCase));}
   void Check(IntPtr window,string exe){
@@ -68,7 +80,7 @@ namespace AppGateServiceEdition {
   }
   void Tick(){
    if(closing)return;
-   if(ParentPid!=0){try{using(var parent=Process.GetProcessById(ParentPid))if(parent.HasExited){ExitThread();return;}}catch(ArgumentException){ExitThread();return;}}
+   if(ParentPid!=0&&DateTime.UtcNow>=nextParentCheck){nextParentCheck=DateTime.UtcNow.AddSeconds(1);try{using(var parent=Process.GetProcessById(ParentPid))if(parent.HasExited){ExitThread();return;}}catch(ArgumentException){ExitThread();return;}}
    if(!polling&&DateTime.UtcNow>=nextPoll){
     polling=true;nextPoll=DateTime.UtcNow.AddMilliseconds(300);
     int revision=authRevision;
@@ -82,7 +94,8 @@ namespace AppGateServiceEdition {
       if(revision!=authRevision)return;
       if(reply!=null&&reply.Ok&&reply.Rules!=null)rules=reply.Rules;
       else foreach(var r in rules)r.Allowed=false; // retain known protections during outage
-      Sweep();
+      // The regular UI timer performs the scan. Do not duplicate every scan
+      // on receipt of a service reply while the user is typing.
      }));}catch(InvalidOperationException){}
     });
    }
@@ -93,12 +106,20 @@ namespace AppGateServiceEdition {
    WindowApi.EnumWindows((w,p)=>{if(WindowApi.GetProp(w,HiddenProperty)!=IntPtr.Zero){WindowApi.RemoveProp(w,HiddenProperty);WindowApi.ShowWindowAsync(w,5);}return true;},IntPtr.Zero);
   }
   void Sweep(){
+   var elapsed=Stopwatch.StartNew();
    var present=new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-   WindowApi.EnumWindows((w,p)=>{string exe=Executable(w);if(exe!=null){if(WindowApi.IsWindowVisible(w)||WindowApi.GetProp(w,HiddenProperty)!=IntPtr.Zero)present.Add(exe);Check(w,exe);}return true;},IntPtr.Zero);
+   WindowApi.EnumWindows((w,p)=>{
+    // Most top-level windows are invisible framework/helper windows. Avoid
+    // process lookup for them; retain marked windows for restart recovery.
+    if(!WindowApi.IsWindowVisible(w)&&WindowApi.GetProp(w,HiddenProperty)==IntPtr.Zero)return true;
+    string exe=Executable(w);if(exe!=null){present.Add(exe);Check(w,exe);}return true;
+   },IntPtr.Zero);
+   if(DateTime.UtcNow>=nextIdentityCleanup){nextIdentityCleanup=DateTime.UtcNow.AddSeconds(2);foreach(var pair in identities.ToArray())if(SessionApi.WaitForSingleObject(pair.Value.Handle,0)!=258){Native.CloseHandle(pair.Value.Handle);identities.Remove(pair.Key);}}
    foreach(var r in rules){if(present.Contains(r.Exe))seenWindows.Add(r.Exe);else if(seenWindows.Remove(r.Exe)&&r.Allowed){r.Allowed=false;authRevision++;relock.Add(r.Exe);}}
    foreach(var w in hidden.Keys.ToArray())if(!WindowApi.IsWindow(w))hidden.Remove(w);
    if(prompt!=null&&!IsLocked(prompting)){prompt.Close();}
    ShowNext();
+   SweepCount++;MaxSweepMilliseconds=Math.Max(MaxSweepMilliseconds,elapsed.ElapsedMilliseconds);
   }
   void ShowNext(){
    if(closing||prompt!=null)return;
@@ -119,11 +140,16 @@ namespace AppGateServiceEdition {
   }
   protected override void Dispose(bool disposing){
    closing=true;scan.Stop();scan.Dispose();foreach(var hook in hooks)if(hook!=IntPtr.Zero)WindowApi.UnhookWinEvent(hook);
+   foreach(var identity in identities.Values)Native.CloseHandle(identity.Handle);identities.Clear();
    if(prompt!=null){prompt.Close();}dispatch.Dispose();base.Dispose(disposing);
   }
  }
 
  static class WindowApi {
+  [DllImport("kernel32.dll",SetLastError=true)] static extern IntPtr OpenProcess(uint access,bool inherit,uint pid);
+  [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern bool QueryFullProcessImageName(IntPtr process,int flags,StringBuilder path,ref int size);
+  public static IntPtr OpenIdentity(uint pid){return OpenProcess(0x101000,false,pid);}
+  public static string IdentityName(IntPtr handle){var path=new StringBuilder(32768);int size=path.Capacity;return QueryFullProcessImageName(handle,0,path,ref size)?Path.GetFileName(path.ToString()):null;}
   public delegate bool EnumCallback(IntPtr window,IntPtr param);
   public delegate void EventCallback(IntPtr hook,uint kind,IntPtr window,int obj,int child,uint thread,uint time);
   [DllImport("user32.dll")] public static extern bool EnumWindows(EnumCallback callback,IntPtr param);

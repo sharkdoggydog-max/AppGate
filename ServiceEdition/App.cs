@@ -149,6 +149,7 @@ namespace AppGateServiceEdition {
     }
     if(args.Length>0&&args[0]=="--auth-test")return Tests.Auth();
     if(args.Length>0&&args[0]=="--window-test")return Tests.Windows();
+    if(args.Length>0&&args[0]=="--performance-test")return Tests.Performance();
     if(args.Length>0&&args[0]=="--supervisor-test")return Tests.Supervisor();
     if(args.Length==2&&args[0]=="--window-probe"){
      using(var form=new Form{Text="AppGate disposable window",Width=420,Height=220}){form.Shown+=(s,e)=>File.WriteAllText(args[1],form.Handle.ToInt64().ToString());Application.Run(form);}return 0;

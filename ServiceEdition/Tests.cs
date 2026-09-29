@@ -11,6 +11,19 @@ using System.Runtime.InteropServices;
 
 namespace AppGateServiceEdition {
  static class Tests {
+  public static int Performance(){
+   string report=Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"performance-result.txt");
+   var elapsed=Stopwatch.StartNew();int windows=0;
+   for(int i=0;i<10;i++)WindowApi.EnumWindows((w,p)=>{uint pid;WindowApi.GetWindowThreadProcessId(w,out pid);try{using(var process=Process.GetProcessById((int)pid)){var name=process.ProcessName;}}catch{}windows++;return true;},IntPtr.Zero);
+   File.WriteAllText(report,".NET Framework legacy process lookup: "+elapsed.ElapsedMilliseconds+" ms / 10 scans; windows="+windows+"\r\n");
+   Client.PipeName="AppGateTest."+Guid.NewGuid().ToString("N");
+   using(var guard=new WindowGuard())using(var timer=new System.Windows.Forms.Timer{Interval=20}){
+    guard.Send=q=>new Reply{Ok=true,Rules=new System.Collections.Generic.List<Rule>()};
+    var clock=Stopwatch.StartNew();long previous=0,maxGap=0;int ticks=0;
+    timer.Tick+=(s,e)=>{long now=clock.ElapsedMilliseconds;if(ticks++>5)maxGap=Math.Max(maxGap,now-previous);previous=now;if(now>=4000){File.AppendAllText(report,"Optimized scans="+guard.SweepCount+" max_scan_ms="+guard.MaxSweepMilliseconds+" UI_timer_max_gap_ms="+maxGap+"\r\n");timer.Stop();guard.ExitThread();}};
+    timer.Start();Application.Run(guard);
+   }return 0;
+  }
   [StructLayout(LayoutKind.Sequential)] struct SidEntry {public IntPtr Sid;public uint Attributes;}
   [DllImport("advapi32.dll",SetLastError=true)] static extern bool CreateRestrictedToken(IntPtr token,uint flags,uint count,ref SidEntry disable,uint privileges,IntPtr delete,uint restrictCount,IntPtr restrict,out IntPtr result);
   static bool RestrictedCanTerminate(int pid){
